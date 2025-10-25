@@ -1,0 +1,83 @@
+diff -uprN ../asterisk-20.15.2/include/asterisk/res_pjsip.h ./include/asterisk/res_pjsip.h
+--- ../asterisk-20.15.2/include/asterisk/res_pjsip.h	2025-08-29 00:04:41.000000000 +0900
++++ ./include/asterisk/res_pjsip.h	2025-09-23 14:49:11.052149422 +0900
+@@ -849,6 +849,11 @@ struct ast_sip_endpoint_nat_configuratio
+ 	unsigned int force_rport;
+ 	/*! Whether to rewrite the Contact header with the source IP address/port or not */
+ 	unsigned int rewrite_contact;
++	
++	/* TEAMS NAT MODIFICATION START */
++	pj_bool_t nat_teams_notify; /*!< Enable Teams specific NAT handling for OPTIONS */
++	char *nat_teams_contact_fqdn; /*!< FQDN to use in Contact for Teams OPTIONS responses */
++	/* TEAMS NAT MODIFICATION END */
+ };
+ 
+ /*!
+diff -uprN ../asterisk-20.15.2/res/res_pjsip_nat.c ./res/res_pjsip_nat.c
+--- ../asterisk-20.15.2/res/res_pjsip_nat.c	2025-08-29 00:04:41.000000000 +0900
++++ ./res/res_pjsip_nat.c	2025-09-23 16:23:07.246377973 +0900
+@@ -325,6 +325,12 @@ static pj_status_t process_nat(pjsip_tx_
+ 	pjsip_sip_uri *uri = NULL;
+ 	RAII_VAR(struct ao2_container *, hooks, NULL, ao2_cleanup);
+ 
++    /* TEAMS NAT MODIFICATION START */
++    struct ast_sip_endpoint *endpoint = NULL;
++    pjsip_cseq_hdr *cseq = NULL;
++    pjsip_dialog *dlg = NULL;
++    /* TEAMS NAT MODIFICATION END */
++
+ 	if (ast_sip_set_request_transport_details(&details, tdata, 0)) {
+ 		return PJ_SUCCESS;
+ 	}
+@@ -340,6 +346,40 @@ static pj_status_t process_nat(pjsip_tx_
+ 		return PJ_SUCCESS;
+ 	}
+ 
++    /* TEAMS NAT MODIFICATION START */
++    /* Get endpoint from dialog if available */
++    dlg = pjsip_tdata_get_dlg(tdata);
++    if (dlg) {
++        endpoint = ast_sip_dialog_get_endpoint(dlg);
++    }
++    cseq = PJSIP_MSG_CSEQ_HDR(tdata->msg);
++
++    /* Check if this is an OPTIONS message and Teams NAT handling is enabled */
++    if (endpoint && endpoint->nat.nat_teams_notify && 
++        cseq && !pjsip_method_cmp(&cseq->method, &pjsip_options_method) &&
++        endpoint->nat.nat_teams_contact_fqdn && strlen(endpoint->nat.nat_teams_contact_fqdn) > 0) {
++        
++        /* Teams specific handling for OPTIONS messages */
++        if (uri || (uri = ast_sip_get_contact_sip_uri(tdata))) {
++            pj_strdup2(tdata->pool, &uri->host, endpoint->nat.nat_teams_contact_fqdn);
++            ast_debug(4, "Teams NAT: Re-wrote Contact URI host to %s for OPTIONS\n", 
++                endpoint->nat.nat_teams_contact_fqdn);
++        }
++        
++        /* Update via header for OPTIONS if needed */
++        if ((tdata->msg->type == PJSIP_REQUEST_MSG) && 
++            (via || (via = pjsip_msg_find_hdr(tdata->msg, PJSIP_H_VIA, NULL)))) {
++            pj_strdup2(tdata->pool, &via->sent_by.host, endpoint->nat.nat_teams_contact_fqdn);
++            ast_debug(4, "Teams NAT: Re-wrote Via header host to %s for OPTIONS\n", 
++                endpoint->nat.nat_teams_contact_fqdn);
++        }
++        
++        ao2_cleanup(endpoint);
++        goto invoke_hooks; /* Skip normal NAT processing */
++    }
++    ao2_cleanup(endpoint);
++    /* TEAMS NAT MODIFICATION END */
++
+ 	if (transport_state->localnet) {
+ 		ast_sockaddr_parse(&addr, tdata->tp_info.dst_name, PARSE_PORT_FORBID);
+ 		ast_sockaddr_set_port(&addr, tdata->tp_info.dst_port);
+@@ -385,6 +425,10 @@ static pj_status_t process_nat(pjsip_tx_
+ 		}
+ 	}
+ 
++    /* TEAMS NAT MODIFICATION START */
++invoke_hooks:
++    /* TEAMS NAT MODIFICATION END */
++
+ 	/* Invoke any additional hooks that may be registered */
+ 	if ((hooks = ast_sorcery_retrieve_by_fields(ast_sip_get_sorcery(), "nat_hook", AST_RETRIEVE_FLAG_MULTIPLE | AST_RETRIEVE_FLAG_ALL, NULL))) {
+ 		struct nat_hook_details hook_details = {
